@@ -1,3 +1,4 @@
+
 export interface PdfConversionResult {
     imageUrl: string;
     file: File | null;
@@ -5,22 +6,30 @@ export interface PdfConversionResult {
 }
 
 let pdfjsLib: any = null;
-let isLoading = false;
 let loadPromise: Promise<any> | null = null;
 
 async function loadPdfJs(): Promise<any> {
     if (pdfjsLib) return pdfjsLib;
     if (loadPromise) return loadPromise;
 
-    isLoading = true;
-    // @ts-expect-error - pdfjs-dist/build/pdf.mjs is not a module
-    loadPromise = import("pdfjs-dist/build/pdf.mjs").then((lib) => {
-        // Set the worker source to use local file
-        lib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-        pdfjsLib = lib;
-        isLoading = false;
-        return lib;
-    });
+    loadPromise = (async () => {
+        try {
+            const [lib, workerUrl] = await Promise.all([
+                import("pdfjs-dist"),
+                import(
+                    "pdfjs-dist/build/pdf.worker.min.mjs?url"
+                    ),
+            ]);
+
+            lib.GlobalWorkerOptions.workerSrc = workerUrl.default;
+
+            pdfjsLib = lib;
+            return lib;
+        } catch (error) {
+            loadPromise = null;
+            throw error;
+        }
+    })();
 
     return loadPromise;
 }
@@ -39,47 +48,53 @@ export async function convertPdfToImage(
         const canvas = document.createElement("canvas");
         const context = canvas.getContext("2d");
 
+        if (!context) {
+            return {
+                imageUrl: "",
+                file: null,
+                error: "Failed to create canvas context",
+            };
+        }
+
         canvas.width = viewport.width;
         canvas.height = viewport.height;
 
-        if (context) {
-            context.imageSmoothingEnabled = true;
-            context.imageSmoothingQuality = "high";
-        }
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = "high";
 
-        await page.render({ canvasContext: context!, viewport }).promise;
+        await page.render({ canvasContext: context, viewport }).promise;
 
-        return new Promise((resolve) => {
-            canvas.toBlob(
-                (blob) => {
-                    if (blob) {
-                        // Create a File from the blob with the same name as the pdf
-                        const originalName = file.name.replace(/\.pdf$/i, "");
-                        const imageFile = new File([blob], `${originalName}.png`, {
-                            type: "image/png",
-                        });
+        return await new Promise((resolve) => {
+            canvas.toBlob((blob) => {
+                if (!blob) {
+                    resolve({
+                        imageUrl: "",
+                        file: null,
+                        error: "Failed to create image blob",
+                    });
+                    return;
+                }
 
-                        resolve({
-                            imageUrl: URL.createObjectURL(blob),
-                            file: imageFile,
-                        });
-                    } else {
-                        resolve({
-                            imageUrl: "",
-                            file: null,
-                            error: "Failed to create image blob",
-                        });
-                    }
-                },
-                "image/png",
-                1.0
-            ); // Set quality to maximum (1.0)
+                const originalName = file.name.replace(/\.pdf$/i, "");
+                const imageFile = new File(
+                    [blob],
+                    `${originalName}.png`,
+                    { type: "image/png" }
+                );
+
+                resolve({
+                    imageUrl: URL.createObjectURL(blob),
+                    file: imageFile,
+                });
+            }, "image/png");
         });
     } catch (err) {
         return {
             imageUrl: "",
             file: null,
-            error: `Failed to convert PDF: ${err}`,
+            error: `Failed to convert PDF: ${
+                err instanceof Error ? err.message : String(err)
+            }`,
         };
     }
 }
